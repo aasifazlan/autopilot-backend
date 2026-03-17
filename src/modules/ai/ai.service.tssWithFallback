@@ -1,0 +1,101 @@
+import { GoogleGenerativeAI } from "@google/generative-ai"
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string)
+
+/*
+Fallback task generator
+Used when AI fails (quota, network error, invalid response)
+*/
+function generateFallbackTasks(goal: string) {
+
+  return [
+    {
+      title: `Research and understand ${goal}`,
+      estimatedMinutes: 60,
+      importance: 3
+    },
+    {
+      title: `Plan architecture for ${goal}`,
+      estimatedMinutes: 90,
+      importance: 4
+    },
+    {
+      title: `Implement core functionality for ${goal}`,
+      estimatedMinutes: 120,
+      importance: 5
+    }
+  ]
+
+}
+
+export class AIService {
+
+  async generateTasks(
+    title: string,
+    description?: string,
+    deadline?: Date
+  ) {
+
+    try {
+
+      const model = genAI.getGenerativeModel({
+        model: "gemini-1.5-flash"
+      })
+
+      const prompt = `
+You are an AI productivity planner.
+
+Break the following goal into actionable tasks.
+
+Goal Title: ${title}
+
+Description: ${description || "Not provided"}
+
+Deadline: ${deadline || "No deadline"}
+
+Return ONLY valid JSON array like this:
+
+[
+  {
+    "title": "Task name",
+    "estimatedMinutes": number,
+    "importance": 1-5
+  }
+]
+
+Rules:
+- Tasks should be realistic
+- Each task should be actionable
+- Estimated time must be reasonable
+`
+
+      const result = await model.generateContent(prompt)
+
+      const text = result.response.text()
+
+      try {
+
+        const parsed = JSON.parse(text)
+
+        return parsed
+
+      } catch {
+
+        console.error("AI returned invalid JSON:", text)
+
+        return generateFallbackTasks(title)
+
+      }
+
+    } catch (error) {
+
+      console.error("AI generation failed:", error)
+
+      // fallback if Gemini fails (quota/network/etc)
+      return generateFallbackTasks(title)
+
+    }
+
+  }
+
+}
