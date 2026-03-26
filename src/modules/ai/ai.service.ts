@@ -1,7 +1,10 @@
-import { GoogleGenerativeAI } from "@google/generative-ai"
+import OpenAI from "openai"
 import Bottleneck from "bottleneck"
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string)
+const client = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY as string,
+  baseURL: "https://api.groq.com/openai/v1",
+})
 
 /*
 Rate limiter
@@ -31,10 +34,6 @@ export class AIService {
 
       try {
 
-        const model = genAI.getGenerativeModel({
-          model: "gemini-1.5-flash"
-        })
-
         const prompt = `
 Break this goal into actionable tasks.
 
@@ -42,15 +41,19 @@ Goal: ${title}
 Description: ${description || "None"}
 Deadline: ${deadline || "None"}
 
-Return JSON:
+Return ONLY valid JSON:
 [
  { "title": "...", "estimatedMinutes": number, "importance": 1-5 }
 ]
 `
 
-        const result = await model.generateContent(prompt)
+        const response = await client.responses.create({
+          model: "openai/gpt-oss-20b", // you can change this later
+          input: prompt,
+        })
 
-        const text = result.response.text()
+        const text = response.output_text
+        console.log("Groq raw output:", text)
 
         try {
           return JSON.parse(text)
@@ -59,11 +62,10 @@ Return JSON:
         }
 
       } catch (error) {
-
+        console.error("❌ Groq Error:", error)
         console.log("AI failed → fallback used")
 
         return generateFallbackTasks(title)
-
       }
 
     })

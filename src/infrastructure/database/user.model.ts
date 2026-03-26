@@ -8,9 +8,12 @@ export interface IUser extends Document {
   trialExpiresAt?: Date
   password: string,
   // Google OAuth fields
-  googleAccessToken?: string
-  googleRefreshToken?: string
-  googleTokenExpiry?: Date
+  googleTokens?: {
+    googleAccessToken?: string
+    googleRefreshToken?: string
+    googleTokenExpiry?: Date
+  }
+   
 }
 
 const UserSchema = new Schema(
@@ -27,9 +30,10 @@ const UserSchema = new Schema(
     password: {type:String, required: function(){
       return this.provider === "local"
     }},
-    googleAccessToken: {type: String},
-    googleRefreshToken: {type: String},
-    googleTokenExpiry: {type: Date}
+     
+    googleTokens:{
+      type: Schema.Types.Mixed
+    }
   },
   { timestamps: true }
 )

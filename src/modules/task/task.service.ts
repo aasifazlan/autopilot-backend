@@ -40,6 +40,7 @@ export class TaskService {
   async scorePendingTasks(userId: string) {
 
     const tasks = await this.repo.findPendingByUser(userId)
+    
 
     for (const task of tasks) {
 

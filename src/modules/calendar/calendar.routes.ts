@@ -7,7 +7,7 @@ import {
 
 const router = Router()
 
-router.get("/google/connect", authMiddleware, connectGoogle)
+router.get("/google/connect",  connectGoogle)//authMiddleware,
 
 router.get("/google/callback", googleCallback)
 

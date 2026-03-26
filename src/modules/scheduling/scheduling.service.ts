@@ -2,8 +2,14 @@
 
 import { TaskRepository } from "../../infrastructure/repositories/task.repository"
 import { ScheduleBlockModel } from "../../infrastructure/database/scheduleBlock.model"
-import { generateFreeTimeSlots, CalendarEvent } from "../../core/scheduling/timeSlotGenerator"
-import { allocateTasksToSlots, AllocationResult } from "../../core/scheduling/slotAllocator"
+import {
+  generateFreeTimeSlots,
+  CalendarEvent
+} from "../../core/scheduling/timeSlotGenerator"
+import {
+  allocateTasksToSlots,
+  AllocationResult
+} from "../../core/scheduling/slotAllocator"
 import { Task } from "../../shared/types"
 import { calculatePriority } from "../../core/priority/calculatePriority"
 import User from "../../infrastructure/database/user.model"
@@ -17,7 +23,32 @@ export class SchedulingService {
 
   async runSevenDayScheduler(userId: string): Promise<{ message: string }> {
 
-    // Remove previous schedule
+    // 🔥 Get user first (needed for calendar ops)
+    const user = await User.findById(userId)
+    console.log("👤 USER FROM DB:", user)
+    console.log("🆔 Scheduler userId:", userId)
+    console.log("🔑 TOKENS IN SCHEDULER:", user?.googleTokens)
+
+    // 🔥 OPTIONAL: Delete old calendar events before clearing DB
+    if (user?.googleTokens) {
+      const oldBlocks = await ScheduleBlockModel.find({ userId })
+      console.log("USER TOKENS:", user?.googleTokens)
+
+      for (const block of oldBlocks) {
+        if (block.googleEventId) {
+          try {
+            await googleCalendarService.deleteEvent(
+              user,
+              block.googleEventId
+            )
+          } catch (err) {
+            console.error("❌ Failed to delete old event:", err)
+          }
+        }
+      }
+    }
+
+    // Remove previous schedule from DB
     await ScheduleBlockModel.deleteMany({ userId })
 
     const tasks: Task[] = await this.taskRepo.findPendingByUser(userId)
@@ -29,30 +60,22 @@ export class SchedulingService {
 
     const today = new Date()
 
-    // Get user once (important performance fix)
-    const user = await User.findById(userId)
-
-    const tokens = user?.googleAccessToken
-      ? {
-          access_token: user.googleAccessToken,
-          refresh_token: user.googleRefreshToken
-        }
-      : null
-
     for (let day = 0; day < 7; day++) {
 
       const currentDate = new Date(today)
       currentDate.setDate(today.getDate() + day)
 
-      // Recalculate priority daily
+      // 🔁 Recalculate priority daily
       taskPool.forEach(task => {
         task.priorityScore = calculatePriority(task)
       })
 
-      // Sort tasks by priority
+      // Sort by priority
       taskPool.sort((a, b) => b.priorityScore - a.priorityScore)
 
+      // ⚠️ Currently empty — later replace with real Google busy events
       const busyEvents: CalendarEvent[] = []
+
       const freeSlots = generateFreeTimeSlots(currentDate, busyEvents)
 
       if (freeSlots.length === 0) continue
@@ -63,6 +86,9 @@ export class SchedulingService {
 
       const allocations: AllocationResult[] =
         allocateTasksToSlots(remainingTasks, freeSlots)
+        console.log("TASK COUNT:", tasks.length)
+        console.log("FREE SLOTS:", freeSlots.length)
+        console.log("ALLOCATIONS:", allocations.length)
 
       for (const allocation of allocations) {
 
@@ -74,11 +100,11 @@ export class SchedulingService {
 
         let googleEventId: string | null = null
 
-        // Create Google Calendar event if connected
-        if (tokens) {
+        // ✅ FIXED: Use user.googleTokens instead of manual tokens
+        if (user?.googleTokens) {
           try {
 
-            const event = await googleCalendarService.createEvent(tokens, {
+            const event = await googleCalendarService.createEvent(user, {
               summary: task.title,
               description: "Scheduled by Autopilot",
               start: {
@@ -93,9 +119,14 @@ export class SchedulingService {
 
             googleEventId = event.data.id || null
 
-          } catch (error) {
+            console.log("✅ Event created:", googleEventId)
 
-            console.error("Google Calendar event failed:", error)
+          } catch (error: any) {
+
+            console.error("❌ Google Calendar FULL ERROR:")
+            console.error(
+              error.response?.data || error.message || error
+            )
 
           }
         }
@@ -110,7 +141,7 @@ export class SchedulingService {
           googleEventId
         })
 
-        // Reduce remaining task time
+        // Reduce remaining time
         task.remainingMinutes -= allocation.durationMinutes
 
         // Mark task scheduled
@@ -118,7 +149,7 @@ export class SchedulingService {
 
       }
 
-      // Stop early if all tasks completed
+      // Stop early if all tasks done
       const unfinished = taskPool.some(
         t => t.remainingMinutes > 0
       )
