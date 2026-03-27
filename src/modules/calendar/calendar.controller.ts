@@ -11,7 +11,7 @@ export const connectGoogle = async(req: AuthRequest, res: Response) => {
   
 
   // const userId = req.user?.userId
-  const user = await userModel.findOne({email:"aasiffilms79@gmail.com"})
+  const user = await userModel.findOne({email:"weecodehub@gmail.com"})
   console.log(user)
   const userId= user?._id.toString()
 

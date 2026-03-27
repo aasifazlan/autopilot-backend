@@ -17,66 +17,89 @@ import { GoogleCalendarService } from "../../infrastructure/calendar/googleCalen
 
 const googleCalendarService = new GoogleCalendarService()
 
+type SchedulingMode = "overwrite" | "preserve" | "extend"
+
 export class SchedulingService {
 
   private taskRepo = new TaskRepository()
 
-  async runSevenDayScheduler(userId: string): Promise<{ message: string }> {
+  async runSevenDayScheduler(
+    userId: string,
+    mode: SchedulingMode = "preserve"
+  ): Promise<{ message: string }> {
 
-    // 🔥 Get user first (needed for calendar ops)
     const user = await User.findById(userId)
-    console.log("👤 USER FROM DB:", user)
-    console.log("🆔 Scheduler userId:", userId)
-    console.log("🔑 TOKENS IN SCHEDULER:", user?.googleTokens)
+    if (!user) throw new Error("User not found")
 
-    // 🔥 OPTIONAL: Delete old calendar events before clearing DB
-    if (user?.googleTokens) {
-      const oldBlocks = await ScheduleBlockModel.find({ userId })
-      console.log("USER TOKENS:", user?.googleTokens)
+    console.log("👤 USER:", userId)
+    console.log("⚙️ MODE:", mode)
 
-      for (const block of oldBlocks) {
-        if (block.googleEventId) {
-          try {
-            await googleCalendarService.deleteEvent(
-              user,
-              block.googleEventId
-            )
-          } catch (err) {
-            console.error("❌ Failed to delete old event:", err)
-          }
-        }
+    const existingBlocks = await ScheduleBlockModel.find({ userId })
+
+    // =========================
+    // 🧠 MODE LOGIC
+    // =========================
+
+    if (mode === "preserve" && existingBlocks.length > 0) {
+      return {
+        message:
+          "⚠️ Schedule exists. Use ?mode=overwrite or ?mode=extend"
       }
     }
 
-    // Remove previous schedule from DB
-    await ScheduleBlockModel.deleteMany({ userId })
+    if (mode === "overwrite") {
+      await this.clearAll(user, existingBlocks)
+    }
 
-    const tasks: Task[] = await this.taskRepo.findPendingByUser(userId)
+    // =========================
+    // 🔥 BUSY EVENTS BASE
+    // =========================
+
+    const busyEvents: CalendarEvent[] =
+      mode === "extend"
+        ? existingBlocks.map(b => ({
+            start: b.startTime,
+            end: b.endTime
+          }))
+        : []
+
+    // =========================
+    // 📋 TASKS
+    // =========================
+
+    const tasks: Task[] =
+      await this.taskRepo.findPendingByUser(userId)
 
     const taskPool = tasks.map(task => ({
       ...task,
-      remainingMinutes: task.estimatedMinutes
+      remainingMinutes: task.estimatedMinutes,
+      priorityScore: 0
     }))
 
     const today = new Date()
+
+    // =========================
+    // 🔁 MAIN LOOP
+    // =========================
 
     for (let day = 0; day < 7; day++) {
 
       const currentDate = new Date(today)
       currentDate.setDate(today.getDate() + day)
 
-      // 🔁 Recalculate priority daily
+      console.log(`\n📅 DAY ${day + 1}`)
+
+      // priority
       taskPool.forEach(task => {
         task.priorityScore = calculatePriority(task)
       })
 
-      // Sort by priority
       taskPool.sort((a, b) => b.priorityScore - a.priorityScore)
 
-      // ⚠️ Currently empty — later replace with real Google busy events
-      const busyEvents: CalendarEvent[] = []
-
-      const freeSlots = generateFreeTimeSlots(currentDate, busyEvents)
+      const freeSlots = generateFreeTimeSlots(
+        currentDate,
+        busyEvents
+      )
 
       if (freeSlots.length === 0) continue
 
@@ -84,11 +107,16 @@ export class SchedulingService {
         t => t.remainingMinutes > 0
       )
 
+      if (remainingTasks.length === 0) break
+
       const allocations: AllocationResult[] =
         allocateTasksToSlots(remainingTasks, freeSlots)
-        console.log("TASK COUNT:", tasks.length)
-        console.log("FREE SLOTS:", freeSlots.length)
-        console.log("ALLOCATIONS:", allocations.length)
+
+      console.log("⚡ ALLOCATIONS:", allocations.length)
+
+      // =========================
+      // 📅 CREATE EVENTS
+      // =========================
 
       for (const allocation of allocations) {
 
@@ -100,39 +128,34 @@ export class SchedulingService {
 
         let googleEventId: string | null = null
 
-        // ✅ FIXED: Use user.googleTokens instead of manual tokens
-        if (user?.googleTokens) {
+        if (user.googleTokens) {
           try {
-
-            const event = await googleCalendarService.createEvent(user, {
-              summary: task.title,
-              description: "Scheduled by Autopilot",
-              start: {
-                dateTime: allocation.startTime.toISOString(),
-                timeZone: "Asia/Kolkata"
-              },
-              end: {
-                dateTime: allocation.endTime.toISOString(),
-                timeZone: "Asia/Kolkata"
-              }
-            })
+            const event =
+              await googleCalendarService.createEvent(user, {
+                summary: task.title,
+                description: "Scheduled by Autopilot",
+                start: {
+                  dateTime: allocation.startTime.toISOString(),
+                  timeZone: "Asia/Kolkata"
+                },
+                end: {
+                  dateTime: allocation.endTime.toISOString(),
+                  timeZone: "Asia/Kolkata"
+                }
+              })
 
             googleEventId = event.data.id || null
 
-            console.log("✅ Event created:", googleEventId)
+            console.log("✅ Event:", googleEventId)
 
           } catch (error: any) {
-
-            console.error("❌ Google Calendar FULL ERROR:")
-            console.error(
-              error.response?.data || error.message || error
+            console.error("❌ Calendar error:",
+              error.response?.data || error.message
             )
-
           }
         }
 
-        // Save schedule block
-        await ScheduleBlockModel.create({
+        const newBlock = await ScheduleBlockModel.create({
           userId,
           taskId: allocation.taskId,
           startTime: allocation.startTime,
@@ -141,15 +164,17 @@ export class SchedulingService {
           googleEventId
         })
 
-        // Reduce remaining time
+        // 🔥 CRITICAL FIX → ALWAYS update busyEvents
+        busyEvents.push({
+          start: newBlock.startTime,
+          end: newBlock.endTime
+        })
+
         task.remainingMinutes -= allocation.durationMinutes
 
-        // Mark task scheduled
         await this.taskRepo.markScheduled(allocation.taskId)
-
       }
 
-      // Stop early if all tasks done
       const unfinished = taskPool.some(
         t => t.remainingMinutes > 0
       )
@@ -157,8 +182,42 @@ export class SchedulingService {
       if (!unfinished) break
     }
 
-    return { message: "7-day schedule generated successfully" }
+    return {
+      message: `✅ Schedule generated (${mode})`
+    }
   }
+
+  // =========================
+  // 🗑️ CLEAR ALL
+  // =========================
+
+  private async clearAll(user: any, blocks: any[]) {
+
+    console.log("🗑️ Clearing schedule")
+
+    if (user.googleTokens) {
+      for (const block of blocks) {
+        if (block.googleEventId) {
+          try {
+            await googleCalendarService.deleteEvent(
+              user,
+              block.googleEventId
+            )
+          } catch (err) {
+            console.error("❌ Delete failed:", err)
+          }
+        }
+      }
+    }
+
+    await ScheduleBlockModel.deleteMany({
+      userId: user._id
+    })
+  }
+
+  // =========================
+  // 📊 GET SCHEDULE
+  // =========================
 
   async getSchedule(
     userId: string,
@@ -172,14 +231,11 @@ export class SchedulingService {
 
     const end = endDate
       ? new Date(endDate)
-      : new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000)
+      : new Date(start.getTime() + 7 * 86400000)
 
     const blocks = await ScheduleBlockModel.find({
       userId,
-      startTime: {
-        $gte: start,
-        $lte: end
-      }
+      startTime: { $gte: start, $lte: end }
     })
       .populate("taskId")
       .sort({ startTime: 1 })
